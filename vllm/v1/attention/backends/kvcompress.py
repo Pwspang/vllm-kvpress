@@ -61,7 +61,7 @@ class KVPress:
         self.kept_token_indices = self.kept_token_indices[indices]
         
         # print("[KEPT TOKEN AFTER]" )
-        print(self.kept_token_indices)
+        # print(self.kept_token_indices)
         
         key_states = key_states[:, :, indices, :]
         value_states = value_states[:, :, indices, :]
