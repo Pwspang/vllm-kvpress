@@ -86,7 +86,6 @@ class KVPress:
         else:
             # Calculate how many new tokens to add
             num_new = kv_cache_len - self.kept_token_indices.numel()
-            print(num_new)
             if num_new > 0:
                 new_idx = torch.arange(
                     self.index + 1,
