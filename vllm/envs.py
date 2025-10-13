@@ -156,8 +156,8 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-    VLLM_V1_R_KV_BUDGET: int = 64
-    VLLM_V1_R_KV_BUFFER: int = 64
+    VLLM_V1_R_KV_BUDGET: int = 20
+    VLLM_V1_R_KV_BUFFER: int = 10
 
 
 def get_default_cache_root():

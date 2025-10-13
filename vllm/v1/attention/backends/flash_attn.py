@@ -7,7 +7,7 @@ from typing import ClassVar, Optional
 import numpy as np
 import torch
 
-from rkv.modeling import R1KV
+from vllm.v1.attention.backends.kvcompress import KVPress
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -423,7 +423,7 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
-        self.kvcompressor = R1KV(budget=VLLM_V1_R_KV_BUDGET)
+        self.kvcompressor = KVPress()
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -564,10 +564,8 @@ class FlashAttentionImpl(AttentionImpl):
                  torch.cumsum(attn_metadata.seq_lens, dim=0) - 1),
                 dim=0
             )
-            if VLLM_V1_R_KV_BUDGET <= 0 or VLLM_V1_R_KV_BUFFER <= 0:
-                return output
             for i in range(attn_metadata.num_reqs):
-                if attn_metadata.seq_lens[i].cpu().item() < VLLM_V1_R_KV_BUDGET + VLLM_V1_R_KV_BUFFER:
+                if attn_metadata.seq_lens[i].cpu().item() < 5:
                     continue
                 current_key_cache = key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[
                     attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i + 1]], ...

@@ -78,6 +78,7 @@ from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from vllm.v1.logprobs_store import global_logprobs, global_logprobs_lock
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -92,7 +93,6 @@ else:
         "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
-
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
@@ -1678,12 +1678,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
-
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
             scheduler_output,
         )
+        
+        # Add prompt to initial (Assume that batch size is one, will reset logprobs)
+        if prompt_logprobs_dict:
+            with global_logprobs_lock:
+                global_logprobs = [0.0 for i in list(prompt_logprobs_dict.values())[0].logprobs]
+            
+        with global_logprobs_lock:
+            # print(logprobs_lists.logprobs[0])
+            global_logprobs.append(logprobs_lists.logprobs[0][0])
 
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
