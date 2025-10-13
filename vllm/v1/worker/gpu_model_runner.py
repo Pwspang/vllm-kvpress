@@ -78,7 +78,7 @@ from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
-from vllm.v1.logprobs_store import global_logprobs, global_logprobs_lock
+from vllm.v1.logprobs_store import global_logprobs
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -1686,12 +1686,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         
         # Add prompt to initial (Assume that batch size is one, will reset logprobs)
         if prompt_logprobs_dict:
-            with global_logprobs_lock:
-                global_logprobs = [0.0 for i in list(prompt_logprobs_dict.values())[0].logprobs]
+            global_logprobs.clear() 
+            global_logprobs.add_batch([0.0 for i in list(prompt_logprobs_dict.values())[0].logprobs])
             
-        with global_logprobs_lock:
-            # print(logprobs_lists.logprobs[0])
-            global_logprobs.append(logprobs_lists.logprobs[0][0])
+        global_logprobs.add(logprobs_lists.logprobs[0][0])
 
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids

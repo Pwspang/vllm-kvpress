@@ -1,7 +1,6 @@
 import torch
-import torch.nn.functional as F
 
-from vllm.v1.logprobs_store import global_logprobs, global_logprobs_lock
+from vllm.v1.logprobs_store import global_logprobs
 
 class KVPress:
     def __init__(
@@ -34,27 +33,40 @@ class KVPress:
         self.steps += 1
         
         # Dont prune anything
-        if kv_cache_len < self.budget or self.steps % 10 == 0:
+        if kv_cache_len < self.budget:
+            self.kept_token_indices = torch.tensor([])
             return key_states, value_states
+        
+        if self.steps % 40 != 0:
+            return key_states, value_states
+
+        # print(f"[KEY CACHE] {key_states.shape}")
+        
             
-        # Get extend mapping for current KV Cache
+        # Get extend mapping for current indices
         self.extend_indices(kv_cache_len, key_states.device)
         
-        # Random dropping for kv compress
-        # idx = torch.randperm(self.kept_token_indices.numel())[:self.budget]
-        # random_index = self.kept_token_indices[idx]
-        with global_logprobs_lock:
-            logprob = torch.tensor(global_logprobs, device=key_states.device)
-            logprob_index = torch.index_select(logprob, dim=0, index=self.kept_token_indices)
-        
+        logprob = torch.tensor(global_logprobs.get_all(), device=key_states.device)
+        logprob_index = torch.index_select(logprob, dim=0, index=self.kept_token_indices)
+
+        # # print(f"[Logprob] {logprob_index}")
+                
         top_values, top_indices = torch.topk(logprob_index, self.budget)
+         
+        indices = self.to_keep(self.kept_token_indices, top_indices)  
         
-        indices = self.to_keep(self.kept_token_indices, top_indices)   
+        # # print("[KEPT TOKEN BEFORE]")
+        # # print(self.kept_token_indices)
         
-        # print(indices)     
+        self.kept_token_indices = self.kept_token_indices[indices]
+        
+        # print("[KEPT TOKEN AFTER]" )
+        print(self.kept_token_indices)
         
         key_states = key_states[:, :, indices, :]
         value_states = value_states[:, :, indices, :]
+        
+        # print(f"[KEY CACHE] {key_states.shape}")
         
         return key_states, value_states
     
@@ -74,6 +86,7 @@ class KVPress:
         else:
             # Calculate how many new tokens to add
             num_new = kv_cache_len - self.kept_token_indices.numel()
+            print(num_new)
             if num_new > 0:
                 new_idx = torch.arange(
                     self.index + 1,
