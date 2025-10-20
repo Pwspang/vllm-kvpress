@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from example_callback import get_indices
 
 logger = init_logger(__name__)
 
@@ -423,7 +424,9 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
-        self.kvcompressor = KVPress()
+        self.kvcompressor = KVPress(
+            get_indices
+        )
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -589,12 +592,18 @@ class FlashAttentionImpl(AttentionImpl):
                     current_key_cache,
                     current_query,
                     current_value_cache,
+                    i
                 )
                 compressed_key_cache = compressed_key_cache.squeeze(0)
                 compressed_value_cache = compressed_value_cache.squeeze(0)
 
                 # overwrite key_cache and value_cache
                 compressed_kv_len = compressed_key_cache.size(1)
+                
+                # Early skip if nothing changes 
+                if current_kv_len - compressed_kv_len == 0:
+                    continue
+                
                 key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[
                     attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i]+compressed_kv_len], ...
                 ] = compressed_key_cache.transpose(0, 1)
@@ -606,6 +615,7 @@ class FlashAttentionImpl(AttentionImpl):
                 if num_dropped_tokens_i != attn_metadata.num_dropped_tokens_list[i]:
                     assert attn_metadata.num_dropped_tokens_list[i] == 0
                     attn_metadata.num_dropped_tokens_list[i] = num_dropped_tokens_i
+                    
             return output
 
         # Cascade attention (rare case).

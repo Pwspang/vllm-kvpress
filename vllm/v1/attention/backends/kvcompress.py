@@ -1,72 +1,66 @@
 import torch
 
-from vllm.v1.logprobs_store import global_logprobs
+# from vllm.v1.logprobs_store import global_logprobs
+from typing import Callable
 
 class KVPress:
     def __init__(
         self,
-        budget=50,
+        callback: Callable,
         **kwargs,
     ):
-        self.budget = budget
-
         # for recording kept token indices
         self.evicted_token_num = 0
         self.kept_token_indices = torch.tensor([])
         self.index = 0
         self.steps = 0
+        self.get_indices = callback
+        
 
     def update_kv(
         self,
         key_states: torch.Tensor,
         query_states: torch.Tensor,
         value_states: torch.Tensor,
+        req_id: int,
     ):
         # This should just run per request only
         # Key Shape: [1, Num Heads, Num Tokens, Dimension]
         # Query Shape: [1, Num Heads, 1, Dimension]
         # Value Shape: [1, Num Heads, Num Tokens, Dimension]
-        # logger.info(f"[Key Size] {key_states.shape} [Query Size] {query_states.shape} [Value Size] {value_states.shape}")
-        
+                
         head_dim = query_states.shape[-1]
         kv_cache_len = key_states.shape[-2]
         self.steps += 1
         
-        # Dont prune anything
-        if kv_cache_len < self.budget:
-            self.kept_token_indices = torch.tensor([])
+        # Comment this out if you dont need to prune under a certain budget
+        if kv_cache_len < 30:
             return key_states, value_states
         
-        if self.steps % 40 != 0:
+        # Run this every some steps to reduce overhead
+        if self.steps % 10 != 0:
             return key_states, value_states
-
-        # print(f"[KEY CACHE] {key_states.shape}")
         
-            
         # Get extend mapping for current indices
         self.extend_indices(kv_cache_len, key_states.device)
         
-        logprob = torch.tensor(global_logprobs.get_all(), device=key_states.device)
-        logprob_index = torch.index_select(logprob, dim=0, index=self.kept_token_indices)
-
-        # # print(f"[Logprob] {logprob_index}")
-                
-        top_values, top_indices = torch.topk(logprob_index, self.budget)
-         
-        indices = self.to_keep(self.kept_token_indices, top_indices)  
+        # Callback function to return a list of indices to keep
+        # Indices should be the indices of overall token position
+        indices: torch.Tensor = self.get_indices(req_id, self.kept_token_indices)
         
-        # # print("[KEPT TOKEN BEFORE]")
-        # # print(self.kept_token_indices)
+        # Remap back overall token position to kept_token_indices position
+        mask = (self.kept_token_indices.unsqueeze(1) == indices).any(dim=1)
+        indices_map = torch.nonzero(mask, as_tuple=True)[0]
         
-        self.kept_token_indices = self.kept_token_indices[indices]
+        self.kept_token_indices = self.kept_token_indices[indices_map]
         
-        # print("[KEPT TOKEN AFTER]" )
-        # print(self.kept_token_indices)
+        # print(f"MAP: {indices_map}")
+        # print(f"KEPT: {self.kept_token_indices}")
         
-        key_states = key_states[:, :, indices, :]
-        value_states = value_states[:, :, indices, :]
         
-        # print(f"[KEY CACHE] {key_states.shape}")
+        # This should collect across all the heads
+        key_states = key_states[:, :, indices_map, :]
+        value_states = value_states[:, :, indices_map, :]
         
         return key_states, value_states
     

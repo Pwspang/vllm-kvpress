@@ -1685,11 +1685,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         
         # Add prompt to initial (Assume that batch size is one, will reset logprobs)
-        if prompt_logprobs_dict:
-            global_logprobs.clear() 
-            global_logprobs.add_batch([0.0 for i in list(prompt_logprobs_dict.values())[0].logprobs])
+        # if prompt_logprobs_dict:
+        #     global_logprobs.clear() 
+        #     global_logprobs.add_batch([0.0 for i in list(prompt_logprobs_dict.values())[0].logprobs])
             
-        global_logprobs.add(logprobs_lists.logprobs[0][0])
+        # global_logprobs.add(logprobs_lists.logprobs[0][0])
 
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
