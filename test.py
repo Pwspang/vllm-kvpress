@@ -7,12 +7,12 @@ from vllm import LLM, SamplingParams
 MODEL_NAME = "facebook/opt-125m"
 TEMPERATURE = 0.8
 TOP_P = 0.95
-MAX_TOKENS = 200
+MAX_TOKENS = 100
 
 # Prompts to generate completions for
 prompts = [
     "Hello, my name is",
-    # "How are you",
+    "How are you",
     # "Good morning",
     # "Every morning Aya goes for a $9$-kilometer-long walk and stops at a coffee shop afterwards. When she walks at a constant speed of $s$ kilometers per hour, the walk takes her 4 hours, including $t$ minutes spent in the coffee shop. When she walks $s+2$ kilometers per hour, the walk takes her 2 hours and 24 minutes, including $t$ minutes spent in the coffee shop. Suppose Aya walks at $s+\\frac{1}{2}$ kilometers per hour. Find the number of minutes the walk takes her, including the $t$ minutes spent in the coffee shop."
 ]
@@ -27,8 +27,8 @@ sampling_params = SamplingParams(
     top_p=TOP_P,
     max_tokens=MAX_TOKENS,
     stop_token_ids=[eos_token_id],
-    logprobs=0,
-    prompt_logprobs=0,
+    # logprobs=0,
+    # prompt_logprobs=0,
 )
 
 # Initialize the LLM
@@ -36,7 +36,8 @@ llm = LLM(
     model=MODEL_NAME,
     enforce_eager=True,
     enable_prefix_caching=False,
-    gpu_memory_utilization=0.3,
+    gpu_memory_utilization=0.6,
+    # max_num_batched_tokens=MAX_TOKENS,
     max_num_seqs=1
 )
 

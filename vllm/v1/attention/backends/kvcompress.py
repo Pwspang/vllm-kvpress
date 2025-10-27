@@ -33,6 +33,7 @@ class KVPress:
         kv_cache_len = key_states.shape[-2]
         self.steps += 1
         
+        
         # Comment this out if you dont need to prune under a certain budget
         if kv_cache_len < 30:
             return key_states, value_states
@@ -73,6 +74,10 @@ class KVPress:
         return indices
     
     def extend_indices(self, kv_cache_len: int, device) -> None:
+        # Reset if kv_cache_len smaller than kept_index, this means it is new request 
+        if kv_cache_len < self.kept_token_indices.numel():
+            self.kept_token_indices = torch.tensor([])
+        
         if self.kept_token_indices.numel() == 0:
             # Initialization for mapping
             self.kept_token_indices = torch.arange(kv_cache_len, device=device)
