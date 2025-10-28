@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast, List, Tuple
 
 import numpy as np
 import torch
@@ -786,6 +786,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         attn_metadata: dict[str, Any] = {}
 
+        # Collect eviction ranges
+        all_evictable_ranges: Optional[List[Tuple[int, int]]] = None
+        if hasattr(scheduler_output, "evictable_token_ranges_map"):
+            ranges_map = scheduler_output.evictable_token_ranges_map
+            if ranges_map:
+                all_evictable_ranges = []
+                for req_id in self.input_batch.req_ids:
+                    if ranges := ranges_map.get(req_id):
+                        all_evictable_ranges.extend(ranges)
+                if not all_evictable_ranges:
+                    all_evictable_ranges = None
+        
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
         if self.is_encoder_only_model:
@@ -845,9 +857,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
+                # Pass eviction ranges to builder
                 attn_metadata_i = (builder.build(
                     common_prefix_len=common_prefix_len,
                     common_attn_metadata=common_attn_metadata,
+                    evictable_token_ranges=all_evictable_ranges,
                 ))
 
                 fast_prefill_metadata = attn_metadata_i

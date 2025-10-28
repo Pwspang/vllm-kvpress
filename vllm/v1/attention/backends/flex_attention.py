@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with FlashAttention."""
+"""Attention layer with FlexAttention and KV cache eviction support."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Tuple
+from functools import lru_cache
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -34,6 +35,34 @@ def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
     counts = offsets[1:] - offsets[:-1]
     return torch.repeat_interleave(
         torch.arange(len(counts), device=device, dtype=torch.int32), counts)
+
+
+def _create_eviction_mask_tensor(
+    evictable_ranges: List[Tuple[int, int]],
+    max_seq_len: int,
+    device: torch.device
+) -> torch.Tensor:
+    """
+    Create a boolean mask tensor where True indicates evicted positions.
+    
+    Args:
+        evictable_ranges: List of (start, end) token ranges to evict
+        max_seq_len: Maximum sequence length
+        device: Device for the tensor
+    
+    Returns:
+        Boolean tensor of shape [max_seq_len] where True = evicted
+    """
+    if not evictable_ranges:
+        return None
+    
+    mask = torch.zeros(max_seq_len, dtype=torch.bool, device=device)
+    
+    for start, end in evictable_ranges:
+        if start < max_seq_len and end <= max_seq_len:
+            mask[start:end] = True
+    
+    return mask
 
 
 class FlexAttentionBackend(AttentionBackend):
@@ -83,44 +112,6 @@ def physical_to_logical_mapping(
         total_blocks: Optional[int] = None) -> torch.Tensor:
     """
     Creates an inverse mapping from physical block locations to logical indices.
-
-    The original block_table maps from logical blocks to physical locations:
-
-    Logical to Physical (Original block_table):
-    ┌───────────────────────────────────────────┐
-    │ Request 0:                                │
-    │                                           │
-    │ Logical Blocks:  0  1  2  3  4  5  6  7   │
-    │                  │  │  │  │  │  │  │  │   │
-    │                  v  v  v  v  v  v  v  v   │
-    │ Physical Blocks: 3  5  1  7  4  2  0  6   │
-    └───────────────────────────────────────────┘
-
-    This function creates the inverse mapping:
-
-    Physical to Logical (Inverse mapping):
-    ┌───────────────────────────────────────────┐
-    │ Request 0:                                │
-    │                                           │
-    │ Physical Blocks: 0  1  2  3  4  5  6  7   │
-    │                  │  │  │  │  │  │  │  │   │
-    │                  v  v  v  v  v  v  v  v   │
-    │ Logical Blocks:  6  2  5  0  4  1  7  3   │
-    └───────────────────────────────────────────┘
-
-    If multiple logical blocks map to the same physical block,
-    this function returns the first (minimum) logical block index.
-
-    If a physical block is not mapped to by any logical block,
-    its value in the result will be -1.
-
-
-    Args:
-        block_table: Tensor of shape [max_reqs, max_num_blocks]
-            mapping logical blocks to physical locations
-
-    Returns:
-        A tensor of shape [max_reqs, max_physical_block]
     """
     max_reqs, max_num_blocks = block_table.shape
     device = block_table.device
@@ -179,25 +170,78 @@ class FlexAttentionMetadata:
     block_mask: Optional[BlockMask] = None
     score_mod: Optional[_score_mod_signature] = None
     logical_mask_mod: _mask_mod_signature = causal_mask_mod
+    
+    # KV Cache Eviction Support - use pre-computed tensor instead of list
+    eviction_mask: Optional[torch.Tensor] = None  # Boolean mask [max_seq_len]
+    
+    # Cache the mask mod function to avoid recreating it
+    _cached_mask_mod: Optional[_mask_mod_signature] = None
+    _mask_mod_cache_key: Optional[int] = None  # Hash of eviction mask
 
     def get_causal_mask_mod(self) -> _mask_mod_signature:
         """Creates the mask_mod function for FlexAttention.
-
-        This function creates the combined mask mod function that handles:
-            1. The paged attention block mapping
-            2. The mapping from packed query sequences to logical query entries
-
-        It also by defaults adds the decoding offset to the query indices.
-        With this info we create the "logical" indices that are passed to
-        mask_mod functions. This allows mask mod functions to be agnostic to
-        layout of the query and key/value tensors.
-
-        TODO is_within_lower_bound: do sequences start on block_boundaries?
+        
+        Caches the mask mod function to avoid recreating on every call.
+        Only rebuilds if eviction_mask changes.
         """
+        # Create cache key based on eviction mask
+        current_cache_key = id(self.eviction_mask) if self.eviction_mask is not None else 0
+        
+        # Return cached version if available and valid
+        if (self._cached_mask_mod is not None and 
+            self._mask_mod_cache_key == current_cache_key):
+            return self._cached_mask_mod
+        
         # Create a lookup mapping from query indices -> request number
         request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        
+        # Pre-capture eviction mask (if any)
+        eviction_mask = self.eviction_mask
+        has_eviction = eviction_mask is not None
+        
+        # Fast path: no eviction
+        if not has_eviction:
+            def final_mask_mod_no_eviction(
+                b: torch.Tensor,
+                h: torch.Tensor,
+                q_idx: torch.Tensor,
+                physical_kv_idx: torch.Tensor,
+            ) -> torch.Tensor:
+                # Map query indices to corresponding request indices
+                q_req = request_lookup[q_idx]
 
-        def final_mask_mod(
+                # Convert physical KV indices to logical indices
+                physical_kv_block = physical_kv_idx // self.block_size
+                physical_kv_offset = physical_kv_idx % self.block_size
+                logical_block_idx = self.physical_to_logical[q_req, physical_kv_block]
+                logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset
+
+                # Determine valid kv indices
+                live_block = logical_block_idx >= 0
+                within_upper_bound = logical_kv_idx < self.seq_lens[q_req]
+                within_lower_bound = logical_kv_idx >= 0
+
+                is_valid = live_block & within_upper_bound & within_lower_bound
+
+                # Convert physical query indices to logical indices
+                local_q_idx = q_idx - self.query_start_loc[q_req]
+                logical_q_idx = local_q_idx + self.decode_offset[q_req]
+
+                # Apply mask modification
+                return torch.where(
+                    is_valid,
+                    self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                    False,
+                )
+            
+            self._cached_mask_mod = final_mask_mod_no_eviction
+            self._mask_mod_cache_key = current_cache_key
+            return final_mask_mod_no_eviction
+        
+        # Slow path: with eviction
+        eviction_mask_size = eviction_mask.size(0)
+        
+        def final_mask_mod_with_eviction(
             b: torch.Tensor,
             h: torch.Tensor,
             q_idx: torch.Tensor,
@@ -209,9 +253,8 @@ class FlexAttentionMetadata:
             # Convert physical KV indices to logical indices
             physical_kv_block = physical_kv_idx // self.block_size
             physical_kv_offset = physical_kv_idx % self.block_size
-            logical_block_idx = self.physical_to_logical[q_req,
-                                                         physical_kv_block]
-            logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset  # noqa: E501
+            logical_block_idx = self.physical_to_logical[q_req, physical_kv_block]
+            logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset
 
             # Determine valid kv indices
             live_block = logical_block_idx >= 0
@@ -224,22 +267,26 @@ class FlexAttentionMetadata:
             local_q_idx = q_idx - self.query_start_loc[q_req]
             logical_q_idx = local_q_idx + self.decode_offset[q_req]
 
-            # Apply mask modification only for valid indices
+            # Check if KV token is evicted (using pre-computed mask)
+            # Clamp logical_kv_idx to valid range before indexing
+            safe_kv_idx = torch.clamp(logical_kv_idx, 0, eviction_mask_size - 1)
+            is_evicted_at_idx = eviction_mask[safe_kv_idx]
+            # Only consider eviction if the index is actually valid
+            is_not_evicted = ~is_evicted_at_idx | ~is_valid
+            
+            # Apply mask modification only for valid, non-evicted indices
             return torch.where(
-                is_valid,
+                is_valid & is_not_evicted,
                 self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx),
                 False,
             )
-
-        return final_mask_mod
+        
+        self._cached_mask_mod = final_mask_mod_with_eviction
+        self._mask_mod_cache_key = current_cache_key
+        return final_mask_mod_with_eviction
 
     def get_bidirectional_mask_mod(self) -> _mask_mod_signature:
-        """Creates the encoder mask_mod function for FlexAttention.
-
-        Since the encoder bidirectional attention doesn't run with 
-        KV cache, this function creates a mask based on the
-        packed query sequences.
-        """
+        """Creates the encoder mask_mod function for FlexAttention."""
         # Create a lookup mapping from query indices -> request number
         request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
 
@@ -254,13 +301,18 @@ class FlexAttentionMetadata:
         return final_mask_mod
 
     def build_block_mask(self) -> BlockMask:
+        """Build block mask only once and cache it."""
+        if self.block_mask is not None:
+            return self.block_mask
+            
         if self.causal:
             mask_mod = self.get_causal_mask_mod()
             kv_len = self.total_cache_tokens
         else:
             mask_mod = self.get_bidirectional_mask_mod()
             kv_len = self.num_actual_tokens
-        return create_block_mask_compiled(
+            
+        self.block_mask = create_block_mask_compiled(
             mask_mod,
             None,
             None,
@@ -268,6 +320,7 @@ class FlexAttentionMetadata:
             kv_len,
             device=self.block_table.device,
         )
+        return self.block_mask
 
     def __post_init__(self):
         assert self.use_cascade is False, "Not implemented yet."
@@ -276,7 +329,8 @@ class FlexAttentionMetadata:
         assert self.prefix_kv_lens is None, "Not implemented yet."
         assert self.suffix_kv_lens is None, "Not implemented yet."
         self.num_blocks = self.total_cache_tokens // self.block_size
-        self.block_mask = self.build_block_mask()
+        # Don't build block mask here - build it lazily on first use
+        # self.block_mask = self.build_block_mask()
 
 
 class FlexAttentionMetadataBuilder(
@@ -300,7 +354,8 @@ class FlexAttentionMetadataBuilder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> FlexAttentionMetadata:
+              fast_build: bool = False,
+              evictable_token_ranges: Optional[List[Tuple[int, int]]] = None) -> FlexAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -329,6 +384,17 @@ class FlexAttentionMetadataBuilder(
         offset_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
             self.device, non_blocking=True)
 
+        # Create eviction mask tensor if evictable ranges provided
+        # Only create if ranges are non-empty
+        eviction_mask = None
+        if evictable_token_ranges and len(evictable_token_ranges) > 0:
+            eviction_mask = _create_eviction_mask_tensor(
+                evictable_token_ranges,
+                max_possible_seq_len,
+                self.device
+            )
+            logger.debug(f"Created eviction mask with {len(evictable_token_ranges)} ranges")
+
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
             num_actual_tokens=num_actual_tokens,
@@ -349,6 +415,7 @@ class FlexAttentionMetadataBuilder(
             physical_to_logical=inverse_block_table,
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
+            eviction_mask=eviction_mask,
         )
         return out
 
@@ -429,7 +496,7 @@ class FlexAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with FLexAttention.
+        """Forward pass with FlexAttention.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
@@ -451,8 +518,6 @@ class FlexAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-            # query = self.view_as_4d(query).permute(0, 2, 1, 3)
-            # return torch.empty_like(query)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
@@ -489,12 +554,12 @@ class FlexAttentionImpl(AttentionImpl):
             )
 
         query = query[:, :, :num_actual_tokens, :]
-        # Doesn't work for now -> constraint violation
-        # torch._dynamo.try_mark_dynamic(query, 2)
+
+        # Build block mask lazily (cached after first build)
+        if attn_metadata.block_mask is None:
+            attn_metadata.build_block_mask()
 
         # default M=64, N=64 may run out of shared memory on some GPUs
-        # TODO: Explicit configs for each GPU?
-        # Not sure how to calculate the shared memory requirement
         extra_kernel_options = defaultdict[str, int](lambda: 64)
         if query.dtype == torch.float32:
             extra_kernel_options["BLOCK_M"] //= 2

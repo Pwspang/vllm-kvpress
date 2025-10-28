@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, List, Tuple
 
 import msgspec
 import zmq
@@ -201,6 +201,11 @@ class EngineCore:
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
+
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: List[Tuple[int, int]]):
+        """Delegates the mask update to the scheduler."""
+        self.scheduler.update_request_mask(request_id, evictable_token_ranges)
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
@@ -740,6 +745,9 @@ class EngineCoreProc(EngineCore):
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
+        elif request_type == EngineCoreRequestType.UPDATE_MASK:
+            request_id, ranges = request
+            self.update_request_mask(request_id, ranges)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)

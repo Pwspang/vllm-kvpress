@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List, Tuple, Dict
 
 if TYPE_CHECKING:
     import numpy as np
@@ -155,3 +155,5 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    evictable_token_ranges_map: Optional[Dict[str, List[Tuple[int, int]]]] = None

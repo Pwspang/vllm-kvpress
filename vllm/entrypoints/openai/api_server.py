@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Optional, List, Tuple
 
 import prometheus_client
 import pydantic
@@ -352,6 +352,11 @@ async def validate_json_request(raw_request: Request):
 router = APIRouter()
 
 
+class UpdateMaskRequest(pydantic.BaseModel):
+    request_id: str
+    evictable_token_ranges: List[Tuple[int, int]]
+
+
 class PrometheusResponse(Response):
     media_type = prometheus_client.CONTENT_TYPE_LATEST
 
@@ -447,6 +452,27 @@ async def health(raw_request: Request) -> Response:
     """Health check."""
     await engine_client(raw_request).check_health()
     return Response(status_code=200)
+
+
+@router.post("/v1/attention/update_mask")
+async def update_attention_mask(request: UpdateMaskRequest,
+                                raw_request: Request):
+    """
+    Endpoint to update the attention mask for a running request.
+    Used for real-time KV cache eviction with FlexAttention.
+    """
+    engine = engine_client(raw_request)
+
+    # The engine must be an AsyncLLM (V1) instance to have this method
+    if hasattr(engine, "update_request_mask"):
+        await engine.update_request_mask(request.request_id,
+                                         request.evictable_token_ranges)
+        return JSONResponse({"success": True})
+    else:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_IMPLEMENTED,
+            detail="The current engine does not support attention mask updates."
+        )
 
 
 @router.get("/load")

@@ -7,7 +7,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Dict, List, Tuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -98,6 +98,8 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # req_id -> evictable ranges (managed by scheduler)
+        self.request_eviction_data: dict[str, List[Tuple[int, int]]] = {}
         # Scheduling policy
         if self.scheduler_config.policy == "priority":
             self.policy = SchedulingPolicy.PRIORITY
@@ -161,6 +163,17 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: List[Tuple[int, int]]):
+        """
+        Stores the evictable token ranges for a request.
+        This is robust to race conditions where the update arrives before the
+        request is officially added. The data will be stored and picked up
+        when the request is scheduled.
+        """
+        self.request_eviction_data[request_id] = evictable_token_ranges
+        logger.debug(f"Stored evictable ranges for request {request_id}")
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -531,6 +544,14 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        # Collect evictable token ranges for scheduled requests
+        evictable_token_ranges_map: Dict[str, List[Tuple[int, int]]] = {}
+        all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
+                                scheduled_running_reqs)
+        for req in all_scheduled_reqs:
+            if ranges := self.request_eviction_data.get(req.request_id):
+                evictable_token_ranges_map[req.request_id] = ranges
+
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
@@ -565,6 +586,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            evictable_token_ranges_map=evictable_token_ranges_map or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1017,6 +1039,8 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
+
+        self.request_eviction_data.pop(request.request_id, None)
 
         if not delay_free_blocks:
             self._free_blocks(request)

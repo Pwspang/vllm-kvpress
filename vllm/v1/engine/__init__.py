@@ -184,6 +184,12 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+    UPDATE_MASK = b'\x05'
+
+
+# To avoid circular imports, define a constant for the request type
+# that can be imported by the client.
+UPDATE_MASK_REQUEST_TYPE = EngineCoreRequestType.UPDATE_MASK
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
