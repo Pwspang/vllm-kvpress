@@ -77,6 +77,7 @@ class KVPress:
         # Reset if kv_cache_len smaller than kept_index, this means it is new request 
         if kv_cache_len < self.kept_token_indices.numel():
             self.kept_token_indices = torch.tensor([])
+            self.index = 0
         
         if self.kept_token_indices.numel() == 0:
             # Initialization for mapping
