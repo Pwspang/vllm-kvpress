@@ -73,6 +73,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from example_callback import get_indices
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
@@ -808,8 +809,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded]
             )
 
+        # This stores attention backend, can be used to access KV Cache Tensor
         attn_metadata: dict[str, Any] = {}
-
+        
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
         if self.is_encoder_only_model:
@@ -833,7 +835,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
             slot_mapping = blk_table.slot_mapping[:total_num_scheduled_tokens]
             occupied_slot_mapping = blk_table.occupied_slot_mapping[:total_num_kv_cache_tokens]
-
+            
+            # Use this to access logical KV cache location.
+            # print(occupied_slot_mapping)
+            
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode.
             blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
@@ -1655,10 +1660,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
+        self.drop_kv_cache(attn_metadata=attn_metadata)
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
         for i, req_id in enumerate(self.input_batch.req_ids):
+            # print(i, req_id) # 0 chatcmpl-b80ee29cf1ac44cb8c649e2dcc9cb719
+            # print(attn_metadata) # dict[str, FlashAttentionMetadata]
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -1761,6 +1769,73 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_dropped_tokens_list=next(iter(attn_metadata.values())).num_dropped_tokens_list,
             num_nans_in_logits=num_nans_in_logits,
         )
+        
+    def drop_kv_cache(self, attn_metadata: dict[str, CommonAttentionMetadata]) -> None:
+        # One callback to ask user which indices to keep 
+        # for i, req_id in enumerate(self.input_batch.req_ids):
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            # Assume all layers share the same slot mapping (Implemented this way)
+            attn = next(iter(attn_metadata.values()))
+            seq_starts_ends_indices = torch.concat(
+                (torch.tensor([0], dtype=torch.int32, device=attn.seq_lens.device),
+                    torch.cumsum(attn.seq_lens, dim=0) - 1),
+                dim=0
+                )
+            
+            slot_mapping = attn.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i + 1]]
+            
+            # print(attn)
+            
+            kept_token_indices = get_indices(req_id, slot_mapping)
+            
+            current_kv_len = slot_mapping.size(0)
+            compressed_kv_len = kept_token_indices.size(0)
+            
+            print(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
+            
+            if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
+                continue
+            
+            for layer_name, common_attn_metadata in attn_metadata.items():
+                
+                kv_cache = attn_layers[layer_name].kv_cache[0]
+                key_cache, value_cache = kv_cache.unbind(0)
+                
+                # TODO: Used more efficient method to overwrite
+                viewed_key = key_cache.reshape(-1, key_cache.size(-2), key_cache.size(-1))
+                viewed_value = value_cache.reshape(-1, key_cache.size(-2), key_cache.size(-1))
+                
+                # current_key_cache = key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[
+                #     slot_mapping, ...
+                # ]
+                # current_value_cache = value_cache.view(-1, value_cache.size(-2), value_cache.size(-1))[
+                #     slot_mapping, ...
+                # ]
+
+                # print("key_cache.view shape:", key_cache.view(-1, key_cache.size(-2), key_cache.size(-1)).shape)
+                # print(common_attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i]+compressed_kv_len])
+                # print(kept_token_indices)
+                
+                # key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[slot_mapping[:compressed_kv_len], ...] = (
+                #     current_key_cache[kept_token_indices, :, :]
+                # )
+                # value_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[slot_mapping[:compressed_kv_len], ...] = (
+                #     current_value_cache[kept_token_indices, :, :]
+                # )
+                
+                dst_idx = slot_mapping[:compressed_kv_len]
+                src_idx = slot_mapping[kept_token_indices]
+                
+                viewed_key.index_copy_(0, dst_idx, viewed_key[src_idx])
+                viewed_value.index_copy_(0, dst_idx, viewed_value[src_idx])
+                
+                
+                num_dropped_tokens_i = current_kv_len - compressed_kv_len
+                if num_dropped_tokens_i != common_attn_metadata.num_dropped_tokens_list[i]:
+                    assert common_attn_metadata.num_dropped_tokens_list[i] == 0
+                    common_attn_metadata.num_dropped_tokens_list[i] = num_dropped_tokens_i
 
     def propose_draft_token_ids(
         self,
