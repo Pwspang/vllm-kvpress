@@ -158,4 +158,4 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
     
-    evictable_token_range_map: Optional[dict[str, list[tuple[int, int]]]]
+    evictable_token_ranges_map: Optional[dict[str, list[tuple[int, int]]]] = None

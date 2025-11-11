@@ -196,6 +196,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        
+        # Evicted Tokens
+        self.evicted_tokens: dict[str, list[tuple[int, int]]] = {}
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -1661,7 +1664,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
         if hasattr(scheduler_output, "evictable_token_ranges_map"):
-            self.drop_kv_cache(attn_metadata=attn_metadata)
+            self.drop_kv_cache(attn_metadata=attn_metadata, scheduler_output.evictable_token_ranges_map)
             
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1772,12 +1775,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_nans_in_logits=num_nans_in_logits,
         )
         
-    def drop_kv_cache(self, attn_metadata: dict[str, CommonAttentionMetadata]) -> None:
-        # One callback to ask user which indices to keep 
-        # for i, req_id in enumerate(self.input_batch.req_ids):
+    def drop_kv_cache(self, attn_metadata: dict[str, CommonAttentionMetadata], evictable_token_ranges_map: dict[str, list[tuple[int, int]]]) -> None:
+        def compute_indices(indices, evicted_ranges):
+            if evicted_ranges.numel() == 0:
+                return indices
+            # evicted_ranges: [num_ranges, 2] with start and end inclusive
+            starts, ends = evicted_ranges[:,0], evicted_ranges[:,1]  # [num_ranges]
+            idx = indices.unsqueeze(1)  # [length,1]
+            mask = ~((idx >= starts) & (idx <= ends)).any(dim=1)  # [length]
+            return indices[mask]
+        
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         
         for i, req_id in enumerate(self.input_batch.req_ids):
+            print(req_id)
+            continue
+            
+            past_evictions = torch.tensor(self.evicted_tokens.get(req_id, []))
+            
+            # Hardcode to test evict first 30 tokens
+            new_evictions = torch.tensor(evictable_token_ranges_map.get(req_id, []))
+            
+            # Skip if no new eviction request is required
+            if torch.all(past_evictions == new_evictions):
+                continue
+            
             # Assume all layers share the same slot mapping (Implemented this way)
             attn = next(iter(attn_metadata.values()))
             seq_starts_ends_indices = torch.concat(
@@ -1790,15 +1812,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             # print(attn)
             
-            kept_token_indices = get_indices(req_id, slot_mapping)
+            # kept_token_indices = get_indices(req_id, slot_mapping)
             
             current_kv_len = slot_mapping.size(0)
-            compressed_kv_len = kept_token_indices.size(0)
             
-            print(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
+            all_indices = torch.arange(current_kv_len)
             
-            if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
-                continue
+            final_old = compute_indices(all_indices, past_evictions) # [4,5,8,9]
+            final_new = compute_indices(all_indices, new_evictions)  # [4,5,9]
+
+            keep_mask = torch.isin(final_old, final_new) # [0,1,3]
+            keep_indices = torch.nonzero(keep_mask).squeeze().cuda()
+
+            compressed_kv_len = keep_indices.size(0)
+            
+            self.evicted_tokens[req_id] = evictable_token_ranges_map[req_id]
+            
+            # print(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
+            
+            # if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
+            #     continue
             
             for layer_name, common_attn_metadata in attn_metadata.items():
                 
@@ -1828,7 +1861,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # )
                 
                 dst_idx = slot_mapping[:compressed_kv_len]
-                src_idx = slot_mapping[kept_token_indices]
+                src_idx = slot_mapping[keep_indices]
                 
                 viewed_key.index_copy_(0, dst_idx, viewed_key[src_idx])
                 viewed_value.index_copy_(0, dst_idx, viewed_value[src_idx])
