@@ -142,6 +142,19 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
+        
+    async def update_request_mask(
+        self,
+        request_id: str,
+        evictable_token_ranges: list[tuple[int, int]],
+    ) -> None:
+        """Update the attention mask for a running request."""
+        if self.errored:
+            raise EngineDeadError()
+        # This will call the corresponding method on the EngineCoreClient,
+        # which needs to be implemented to send a message to the engine process.
+        await self.engine_core.update_request_mask_async(
+            request_id, evictable_token_ranges)
 
     @classmethod
     @deprecate_kwargs(

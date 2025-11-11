@@ -27,7 +27,7 @@ from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
-                            UtilityOutput)
+                            UtilityOutput, UPDATE_MASK_REQUEST_TYPE)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -219,6 +219,15 @@ class EngineCoreClient(ABC):
                                        path: str,
                                        pattern: Optional[str] = None,
                                        max_size: Optional[int] = None) -> None:
+        raise NotImplementedError
+
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: list[tuple[int, int]]):
+        raise NotImplementedError
+
+    async def update_request_mask_async(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
         raise NotImplementedError
 
     async def collective_rpc_async(
@@ -719,6 +728,11 @@ class SyncMPClient(MPClient):
                            max_size: Optional[int] = None) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: list[tuple[int, int]]):
+        if not self.resources.engine_dead:
+            self._send_input(UPDATE_MASK_REQUEST_TYPE,
+                             (request_id, evictable_token_ranges))
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""

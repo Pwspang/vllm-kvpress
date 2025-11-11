@@ -1660,7 +1660,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        self.drop_kv_cache(attn_metadata=attn_metadata)
+        if hasattr(scheduler_output, "evictable_token_ranges_map"):
+            self.drop_kv_cache(attn_metadata=attn_metadata)
+            
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []

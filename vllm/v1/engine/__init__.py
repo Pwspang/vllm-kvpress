@@ -184,7 +184,9 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+    UPDATE_MASK = b'\x05'
 
+UPDATE_MASK_REQUEST_TYPE = EngineCoreRequestType.UPDATE_MASK
 
 class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_size: int
