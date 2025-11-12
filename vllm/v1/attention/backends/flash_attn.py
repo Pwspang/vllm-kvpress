@@ -7,8 +7,6 @@ from typing import ClassVar, Optional
 import numpy as np
 import torch
 
-from vllm.v1.attention.backends.kvcompress import KVPress
-
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
@@ -33,7 +31,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from example_callback import get_indices
 
 logger = init_logger(__name__)
 
@@ -424,9 +421,6 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
-        self.kvcompressor = KVPress(
-            get_indices
-        )
 
         self.sinks = sinks
         if self.sinks is not None:

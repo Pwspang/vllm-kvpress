@@ -934,6 +934,12 @@ class AsyncMPClient(MPClient):
             kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return await self.call_utility_async("collective_rpc", method, timeout,
                                              args, kwargs)
+    async def update_request_mask_async(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
+        if not self.resources.engine_dead:
+            await self._send_input(UPDATE_MASK_REQUEST_TYPE,
+                                   (request_id, evictable_token_ranges))
 
 
 class DPAsyncMPClient(AsyncMPClient):

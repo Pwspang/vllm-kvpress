@@ -68,6 +68,8 @@ async def update_attention_mask(request: Request):
     
     # The engine is typically available on the request state or as a global
     engine = request.app.state.engine
+    
+    logger.info(mask_request.evictable_token_ranges)
 
     await engine.update_request_mask(mask_request.request_id,
                                      mask_request.evictable_token_ranges)

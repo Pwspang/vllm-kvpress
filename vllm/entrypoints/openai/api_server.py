@@ -459,7 +459,8 @@ async def update_attention_mask(request: UpdateMaskRequest,
     Used for real-time KV cache eviction with FlexAttention.
     """
     engine = engine_client(raw_request)
-
+    logger.info(request.request_id)
+    logger.info(request.evictable_token_ranges)
     # The engine must be an AsyncLLM (V1) instance to have this method
     if hasattr(engine, "update_request_mask"):
         await engine.update_request_mask(request.request_id,

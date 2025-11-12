@@ -73,7 +73,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from example_callback import get_indices
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
@@ -1663,8 +1662,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
-        if hasattr(scheduler_output, "evictable_token_ranges_map"):
-            self.drop_kv_cache(attn_metadata=attn_metadata, scheduler_output.evictable_token_ranges_map)
+        # logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
+        if hasattr(scheduler_output, "evictable_token_ranges_map") and scheduler_output.evictable_token_ranges_map:
+            logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
+            self.drop_kv_cache(attn_metadata, scheduler_output.evictable_token_ranges_map)
             
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1788,16 +1789,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         
         for i, req_id in enumerate(self.input_batch.req_ids):
-            print(req_id)
-            continue
-            
             past_evictions = torch.tensor(self.evicted_tokens.get(req_id, []))
-            
-            # Hardcode to test evict first 30 tokens
             new_evictions = torch.tensor(evictable_token_ranges_map.get(req_id, []))
             
             # Skip if no new eviction request is required
-            if torch.all(past_evictions == new_evictions):
+            if past_evictions.shape == new_evictions.shape and torch.all(past_evictions == new_evictions):
                 continue
             
             # Assume all layers share the same slot mapping (Implemented this way)
@@ -1832,6 +1828,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             # if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
             #     continue
+            
+            logger.info(f"Before Compression: {current_kv_len} After Compression: {compressed_kv_len}")
             
             for layer_name, common_attn_metadata in attn_metadata.items():
                 
