@@ -549,9 +549,9 @@ class Scheduler(SchedulerInterface):
         all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
                                 scheduled_running_reqs)
         for req in all_scheduled_reqs:
-            if ranges := self.request_eviction_data.get(req.request_id):
+            if ranges := self.request_eviction_data.get(req.request_id.split("-")[-1]):
                 evictable_token_ranges_map[req.request_id] = ranges
-
+        logger.info(f"Evictable Token Ranges Map: {evictable_token_ranges_map}")
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
