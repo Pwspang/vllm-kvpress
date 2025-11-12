@@ -198,6 +198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         
         # Evicted Tokens
         self.evicted_tokens: dict[str, list[tuple[int, int]]] = {}
+        self.evicted_tokens_num: dict[str, int] = {}
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -1664,7 +1665,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
         if hasattr(scheduler_output, "evictable_token_ranges_map") and scheduler_output.evictable_token_ranges_map:
-            logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
+            logger.debug(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
             self.drop_kv_cache(attn_metadata, scheduler_output.evictable_token_ranges_map)
             
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -1812,7 +1813,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             current_kv_len = slot_mapping.size(0)
             
-            all_indices = torch.arange(current_kv_len)
+            all_indices = torch.arange(current_kv_len + self.evicted_tokens_num.get(req_id, 0))
             
             final_old = compute_indices(all_indices, past_evictions) # [4,5,8,9]
             final_new = compute_indices(all_indices, new_evictions)  # [4,5,9]
@@ -1822,14 +1823,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             compressed_kv_len = keep_indices.size(0)
             
-            self.evicted_tokens[req_id] = evictable_token_ranges_map[req_id]
-            
             # print(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
             
             # if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
             #     continue
             
-            logger.info(f"Before Compression: {current_kv_len} After Compression: {compressed_kv_len}")
+            # logger.info(f"Before Compression: {current_kv_len} After Compression: {compressed_kv_len}")
+            # logger.info(f"Past Eviction: {past_evictions}")
+            # logger.info(f"New Eviction: {new_evictions}")
+            # logger.info(f"Final old: {final_old}")
+            # logger.info(f"Final new: {final_new}")
+            # logger.info(f"Kept Token Indices: {keep_indices}")
+            
+            self.evicted_tokens[req_id] = evictable_token_ranges_map[req_id]
+            self.evicted_tokens_num[req_id] = self.evicted_tokens_num.get(req_id, 0) + current_kv_len - compressed_kv_len
             
             for layer_name, common_attn_metadata in attn_metadata.items():
                 
