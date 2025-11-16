@@ -392,6 +392,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
+            self.evicted_tokens.pop(req_id, None)
+            self.evicted_tokens_num(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -676,6 +678,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        # print("num_reqs:", num_reqs)
+        # print("num_kv_cache_tokens:", num_kv_cache_tokens)
+        # print("num_computed_tokens: ", self.input_batch.num_computed_tokens_cpu)
+        # print("num_dropped_tokens_list_cpu", self.input_batch.num_dropped_tokens_list_cpu)
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
         occupied_indices = np.repeat(self.arange_np[:num_reqs],

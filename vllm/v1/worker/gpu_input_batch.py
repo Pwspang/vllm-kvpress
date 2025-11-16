@@ -426,6 +426,7 @@ class InputBatch:
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+        self.num_dropped_tokens_list_cpu[req_index] = 0
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
