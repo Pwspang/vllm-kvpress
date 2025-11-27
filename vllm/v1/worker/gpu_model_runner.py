@@ -94,6 +94,24 @@ else:
 
 logger = init_logger(__name__)
 
+from functools import wraps
+
+def time_function(func):
+    """
+    Decorator to measure the execution time of a function.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()  # Use perf_counter for more precise timing
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        execution_time = end_time - start_time
+        logger.info(f"Function '{func.__name__}' executed in {execution_time:.4f} seconds.")
+        with open("overhead.csv" , "a") as file:
+            file.write(f"{execution_time:.4f}\n")
+        return result
+    return wrapper
+
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def __init__(
@@ -393,7 +411,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
             self.evicted_tokens.pop(req_id, None)
-            self.evicted_tokens_num(req_id, None)
+            self.evicted_tokens_num.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1782,7 +1800,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_dropped_tokens_list=next(iter(attn_metadata.values())).num_dropped_tokens_list,
             num_nans_in_logits=num_nans_in_logits,
         )
-        
+    
     def drop_kv_cache(self, attn_metadata: dict[str, CommonAttentionMetadata], evictable_token_ranges_map: dict[str, list[tuple[int, int]]]) -> None:
         def compute_indices(indices, evicted_ranges):
             if evicted_ranges.numel() == 0:
