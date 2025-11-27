@@ -7,6 +7,8 @@ from typing import Optional, List, Tuple
 from functools import lru_cache
 
 import torch
+
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
                                                _score_mod_signature,
                                                create_block_mask,
@@ -177,6 +179,10 @@ class FlexAttentionMetadata:
     # Cache the mask mod function to avoid recreating it
     _cached_mask_mod: Optional[_mask_mod_signature] = None
     _mask_mod_cache_key: Optional[int] = None  # Hash of eviction mask
+    
+    # L2 Norm tracking - request IDs for the batch
+    request_ids: Optional[List[str]] = None
+    compute_l2_norms: bool = False  # Whether to compute L2 norms this step
 
     def get_causal_mask_mod(self) -> _mask_mod_signature:
         """Creates the mask_mod function for FlexAttention.
@@ -355,7 +361,9 @@ class FlexAttentionMetadataBuilder(
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False,
-              evictable_token_ranges: Optional[List[Tuple[int, int]]] = None) -> FlexAttentionMetadata:
+              evictable_token_ranges: Optional[List[Tuple[int, int]]] = None,
+              request_ids: Optional[List[str]] = None,
+              compute_l2_norms: bool = False) -> FlexAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -416,6 +424,8 @@ class FlexAttentionMetadataBuilder(
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             eviction_mask=eviction_mask,
+            request_ids=request_ids,
+            compute_l2_norms=compute_l2_norms,
         )
         return out
 
@@ -543,6 +553,37 @@ class FlexAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+            
+            # Compute L2 norms of keys if enabled and request_ids available
+            if (attn_metadata.compute_l2_norms and 
+                attn_metadata.request_ids is not None):
+                try:
+                    l2_cache = get_l2_norm_cache()
+                    # Extract layer index from layer name (e.g., "model.layers.0.self_attn" -> 0)
+                    layer_idx = None
+                    if hasattr(layer, 'layer_name') and layer.layer_name:
+                        import re
+                        match = re.search(r'\.layers\.(\d+)\.', layer.layer_name)
+                        if match:
+                            layer_idx = int(match.group(1))
+                    
+                    if l2_cache.is_enabled and (layer_idx is None or l2_cache.should_compute_for_layer(layer_idx)):
+                        # key_cache shape is already [num_blocks, block_size, num_kv_heads, head_size]
+                        # No reshape needed!
+                        if layer_idx == 0:  # Only log once per forward pass
+                            logger.info(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
+                        l2_cache.update_norms_batch(
+                            request_ids=attn_metadata.request_ids,
+                            key_cache=key_cache,  # Already in correct shape
+                            block_table=attn_metadata.block_table,
+                            seq_lens=attn_metadata.seq_lens,
+                            block_size=attn_metadata.block_size,
+                            layer_idx=layer_idx,
+                        )
+                except Exception as e:
+                    logger.warning(f"Error computing L2 norms: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             # View out the block_size dim
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)

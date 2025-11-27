@@ -156,6 +156,28 @@ class AsyncLLM(EngineClient):
         await self.engine_core.update_request_mask_async(
             request_id, evictable_token_ranges)
 
+    async def get_request_l2_norms(
+        self,
+        request_id: str,
+    ) -> Optional[List[float]]:
+        """
+        Get L2 norms of attention keys for a running request.
+        
+        This calls the EngineCore via RPC since the L2NormCache exists
+        in the EngineCore worker process, not the API server process.
+        
+        Returns:
+            List of L2 norms per token, or None if not available.
+        """
+        if self.errored:
+            raise EngineDeadError()
+        
+        try:
+            return await self.engine_core.get_request_l2_norms_async(request_id)
+        except Exception as e:
+            logger.debug(f"Could not get L2 norms for {request_id}: {e}")
+            return None
+
     @classmethod
     @deprecate_kwargs(
         "disable_log_requests",

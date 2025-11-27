@@ -172,8 +172,13 @@ class Scheduler(SchedulerInterface):
         request is officially added. The data will be stored and picked up
         when the request is scheduled.
         """
+        # Store under both the full ID and the stripped ID for compatibility
         self.request_eviction_data[request_id] = evictable_token_ranges
-        logger.debug(f"Stored evictable ranges for request {request_id}")
+        # Also store without the "chatcmpl-" prefix if present
+        if request_id.startswith("chatcmpl-"):
+            stripped_id = request_id[len("chatcmpl-"):]
+            self.request_eviction_data[stripped_id] = evictable_token_ranges
+        logger.debug(f"Stored evictable ranges for request {request_id}: {len(evictable_token_ranges)} ranges")
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -549,7 +554,15 @@ class Scheduler(SchedulerInterface):
         all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
                                 scheduled_running_reqs)
         for req in all_scheduled_reqs:
-            if ranges := self.request_eviction_data.get(req.request_id.split("-")[-1]):
+            # Try multiple key formats:
+            # 1. Full request ID (e.g., "chatcmpl-q0_c0_global")
+            # 2. Without "chatcmpl-" prefix (e.g., "q0_c0_global")
+            req_id = req.request_id
+            ranges = self.request_eviction_data.get(req_id)
+            if ranges is None and req_id.startswith("chatcmpl-"):
+                # Try without prefix
+                ranges = self.request_eviction_data.get(req_id[len("chatcmpl-"):])
+            if ranges:
                 evictable_token_ranges_map[req.request_id] = ranges
         logger.debug(f"Evictable Token Ranges Map: {evictable_token_ranges_map}")
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
