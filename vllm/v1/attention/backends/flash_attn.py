@@ -130,10 +130,6 @@ class FlashAttentionMetadata:
     num_reqs: int
     num_dropped_tokens_list: list[int]
     occupied_slot_mapping: torch.Tensor
-    
-    #L2 Norm Tracking 
-    compute_l2_norms: bool = False
-    request_ids: Optional[List[str]] = None
 
     # For cascade attention.
     use_cascade: bool
@@ -148,6 +144,10 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
+    
+    #L2 Norm Tracking 
+    compute_l2_norms: bool = False
+    request_ids: Optional[List[str]] = None
 
 
 def _get_sliding_window_configs(
@@ -525,7 +525,8 @@ class FlashAttentionImpl(AttentionImpl):
                         key_cache=key_cache,  # Already in correct shape
                         block_table=attn_metadata.block_table,
                         seq_lens=attn_metadata.seq_lens,
-                        block_size=attn_metadata.block_size,
+                        block_size=16
+                        ,
                         layer_idx=layer_idx,
                     )
             except Exception as e:
