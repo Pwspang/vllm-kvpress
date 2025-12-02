@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, List
 
 import numpy as np
 import torch
@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 
 logger = init_logger(__name__)
 
@@ -129,6 +130,10 @@ class FlashAttentionMetadata:
     num_reqs: int
     num_dropped_tokens_list: list[int]
     occupied_slot_mapping: torch.Tensor
+    
+    #L2 Norm Tracking 
+    compute_l2_norms: bool = False
+    request_ids: Optional[List[str]] = None
 
     # For cascade attention.
     use_cascade: bool
@@ -216,7 +221,9 @@ class FlashAttentionMetadataBuilder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> FlashAttentionMetadata:
+              fast_build: bool = False,
+              request_ids: Optional[List[str]] = None,
+              compute_l2_norms: bool = False) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few 
         iterations i.e. spec-decode
@@ -358,7 +365,10 @@ class FlashAttentionMetadataBuilder(
             num_reqs=num_reqs,
             num_dropped_tokens_list=num_dropped_tokens_list,
             occupied_slot_mapping=occupied_slot_mapping,
-            causal=causal)
+            causal=causal,
+            request_ids=request_ids,
+            compute_l2_norms=compute_l2_norms,
+            )
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -491,6 +501,38 @@ class FlashAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
+        
+        # Compute L2 norms of keys if enabled and request_ids available
+        if (attn_metadata.compute_l2_norms and 
+            attn_metadata.request_ids is not None):
+            try:
+                l2_cache = get_l2_norm_cache()
+                # Extract layer index from layer name (e.g., "model.layers.0.self_attn" -> 0)
+                layer_idx = None
+                if hasattr(layer, 'layer_name') and layer.layer_name:
+                    import re
+                    match = re.search(r'\.layers\.(\d+)\.', layer.layer_name)
+                    if match:
+                        layer_idx = int(match.group(1))
+                
+                if l2_cache.is_enabled and (layer_idx is None or l2_cache.should_compute_for_layer(layer_idx)):
+                    # key_cache shape is already [num_blocks, block_size, num_kv_heads, head_size]
+                    # No reshape needed!
+                    if layer_idx == 0:  # Only log once per forward pass
+                        logger.info(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
+                    l2_cache.update_norms_batch(
+                        request_ids=attn_metadata.request_ids,
+                        key_cache=key_cache,  # Already in correct shape
+                        block_table=attn_metadata.block_table,
+                        seq_lens=attn_metadata.seq_lens,
+                        block_size=attn_metadata.block_size,
+                        layer_idx=layer_idx,
+                    )
+            except Exception as e:
+                logger.warning(f"Error computing L2 norms: {e}")
+                import traceback
+                traceback.print_exc()
+
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.

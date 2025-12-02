@@ -359,6 +359,17 @@ class UpdateMaskRequest(pydantic.BaseModel):
     request_id: str
     evictable_token_ranges: List[Tuple[int, int]]
 
+class L2NormsRequest(pydantic.BaseModel):
+    request_id: str
+
+
+class L2NormConfigRequest(pydantic.BaseModel):
+    """Request to configure L2 norm computation."""
+    l2_norm_layers: Optional[List[int]] = None  # Layers to use (None = all)
+    skip_layers: Optional[List[int]] = None     # Layers to skip
+    enabled: Optional[bool] = None              # Enable/disable L2 norm computation
+
+
 def mount_metrics(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
 
@@ -471,6 +482,100 @@ async def update_attention_mask(request: UpdateMaskRequest,
             status_code=HTTPStatus.NOT_IMPLEMENTED,
             detail="The current engine does not support attention mask updates."
         )
+        
+
+@router.post("/v1/attention/l2_norms/config")
+async def configure_l2_norms(request: L2NormConfigRequest, raw_request: Request):
+    """
+    Endpoint to configure L2 norm computation for attention layers.
+    
+    Allows specifying which layers to use for L2 norm computation,
+    similar to skip_layers in l2_compress.py.
+    
+    Args:
+        l2_norm_layers: List of layer indices to use for L2 norm computation.
+                        If None, all layers are used.
+        skip_layers: List of layer indices to skip for L2 norm computation.
+                     Takes precedence over l2_norm_layers.
+        enabled: Enable or disable L2 norm computation globally.
+    
+    Returns:
+        JSON with current configuration.
+    """
+    engine = engine_client(raw_request)
+    
+    # Check if engine supports RPC-based L2 norm configuration
+    if hasattr(engine, 'engine_core') and hasattr(engine.engine_core, 'configure_l2_norms_async'):
+        try:
+            result = await engine.engine_core.configure_l2_norms_async(
+                l2_norm_layers=request.l2_norm_layers,
+                skip_layers=request.skip_layers,
+                enabled=request.enabled if request.enabled is not None else True
+            )
+            
+            if "error" in result:
+                return JSONResponse({
+                    "success": False,
+                    "error": result["error"]
+                }, status_code=500)
+            
+            return JSONResponse({
+                "success": True,
+                "config": result
+            })
+        except Exception as e:
+            return JSONResponse({
+                "success": False,
+                "error": str(e)
+            }, status_code=500)
+    else:
+        return JSONResponse({
+            "success": False,
+            "error": "L2 norm configuration not supported by current engine"
+        }, status_code=501)
+
+
+@router.get("/v1/attention/l2_norms/config")
+async def get_l2_norms_config(raw_request: Request):
+    """
+    Endpoint to get current L2 norm configuration.
+    
+    Returns:
+        JSON with current configuration including enabled state and layer filters.
+    """
+    engine = engine_client(raw_request)
+    
+    # Check if engine supports RPC-based L2 norm configuration
+    if hasattr(engine, 'engine_core') and hasattr(engine.engine_core, 'configure_l2_norms_async'):
+        try:
+            # Get current config by calling with no changes
+            result = await engine.engine_core.configure_l2_norms_async(
+                l2_norm_layers=None,
+                skip_layers=None,
+                enabled=True  # No change - just read current state
+            )
+            
+            if "error" in result:
+                return JSONResponse({
+                    "success": False,
+                    "error": result["error"]
+                }, status_code=500)
+            
+            return JSONResponse({
+                "success": True,
+                "config": result
+            })
+        except Exception as e:
+            return JSONResponse({
+                "success": False,
+                "error": str(e)
+            }, status_code=500)
+    else:
+        return JSONResponse({
+            "success": False,
+            "error": "L2 norm configuration not supported by current engine"
+        }, status_code=501)
+
 
 
 @router.get("/load")

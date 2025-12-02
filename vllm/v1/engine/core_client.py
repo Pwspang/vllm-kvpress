@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, List
 
 import msgspec.msgpack
 import zmq
@@ -940,6 +940,23 @@ class AsyncMPClient(MPClient):
         if not self.resources.engine_dead:
             await self._send_input(UPDATE_MASK_REQUEST_TYPE,
                                    (request_id, evictable_token_ranges))
+
+    async def get_request_l2_norms_async(
+        self, request_id: str
+    ) -> Optional[List[float]]:
+        """Get L2 norms of attention keys for a running request via RPC."""
+        return await self.call_utility_async("get_request_l2_norms", request_id)
+
+    async def configure_l2_norms_async(
+        self,
+        l2_norm_layers: Optional[List[int]] = None,
+        skip_layers: Optional[List[int]] = None,
+        enabled: bool = True
+    ) -> dict:
+        """Configure L2 norm computation settings via RPC."""
+        return await self.call_utility_async("configure_l2_norms", 
+                                             l2_norm_layers, skip_layers, enabled)
+
 
 
 class DPAsyncMPClient(AsyncMPClient):

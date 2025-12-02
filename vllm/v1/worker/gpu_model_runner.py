@@ -904,11 +904,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_spec.kv_cache_spec,
                         builder,
                     )
-
-                attn_metadata_i = (builder.build(
-                    common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
-                ))
+                
+                # Get request IDs for L2 norm tracking
+                # Check if the builder supports request_ids and compute_l2_norms args
+                builder_kwargs = {
+                    'common_prefix_len': common_prefix_len,
+                    'common_attn_metadata': common_attn_metadata,
+                }
+                
+                # Add request_ids if builder supports it (FlexAttention)
+                if hasattr(builder, 'build'):
+                    import inspect
+                    sig = inspect.signature(builder.build)
+                    if 'request_ids' in sig.parameters:
+                        builder_kwargs['request_ids'] = list(self.input_batch.req_ids[:num_reqs])
+                        builder_kwargs['compute_l2_norms'] = True
+                
+                # Pass eviction ranges to builder
+                attn_metadata_i = builder.build(**builder_kwargs)
 
                 fast_prefill_metadata = attn_metadata_i
                 if (self.cache_config.kv_sharing_fast_prefill
