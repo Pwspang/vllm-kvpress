@@ -462,6 +462,42 @@ async def health(raw_request: Request) -> Response:
     await engine_client(raw_request).check_health()
     return Response(status_code=200)
 
+@router.post("/v1/attention/l2_norms")
+async def get_l2_norms(request: L2NormsRequest, raw_request: Request):
+    """
+    Endpoint to get L2 norms of attention keys for a running request.
+    Used for L2 norm-based KV cache eviction decisions.
+    
+    Returns:
+        JSON with 'l2_norms' containing per-token L2 norms, or None if unavailable.
+    """
+    engine = engine_client(raw_request)
+
+    # Check if the engine supports L2 norm retrieval
+    if hasattr(engine, "get_request_l2_norms"):
+        l2_norms = await engine.get_request_l2_norms(request.request_id)
+        if l2_norms is not None:
+            return JSONResponse({
+                "success": True,
+                "request_id": request.request_id,
+                "l2_norms": l2_norms.tolist() if hasattr(l2_norms, 'tolist') else list(l2_norms)
+            })
+        else:
+            return JSONResponse({
+                "success": True,
+                "request_id": request.request_id,
+                "l2_norms": None,
+                "message": "L2 norms not yet available for this request"
+            })
+    else:
+        # Return empty response instead of error for compatibility
+        return JSONResponse({
+            "success": True,
+            "request_id": request.request_id,
+            "l2_norms": None,
+            "message": "L2 norm retrieval not supported by current engine"
+        })
+
 @router.post("/v1/attention/update_mask")
 async def update_attention_mask(request: UpdateMaskRequest,
                                 raw_request: Request):
