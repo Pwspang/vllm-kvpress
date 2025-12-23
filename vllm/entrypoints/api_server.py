@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 NOTE: This API server is used only for demonstrating usage of AsyncEngine
 and simple performance benchmarks. It is not intended for production use.
@@ -11,11 +12,13 @@ import json
 import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
-from typing import Any, Optional
+from pydantic import BaseModel
+from typing import Any, Optional, List, Tuple
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
@@ -28,9 +31,12 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
 
-TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
+
+class UpdateMaskRequest(BaseModel):
+    request_id: str
+    evictable_token_ranges: List[Tuple[int, int]]
 
 
 @app.get("/health")
@@ -50,6 +56,24 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     return await _generate(request_dict, raw_request=request)
+
+@app.post("/v1/attention/update_mask")
+async def update_attention_mask(request: Request):
+    """
+    Endpoint to update the attention mask for a running request.
+    Used for real-time KV cache eviction with FlexAttention.
+    """
+    json_request = await request.json()
+    mask_request = UpdateMaskRequest.parse_obj(json_request)
+    
+    # The engine is typically available on the request state or as a global
+    engine = request.app.state.engine
+    
+    logger.info(mask_request.evictable_token_ranges)
+
+    await engine.update_request_mask(mask_request.request_id,
+                                     mask_request.evictable_token_ranges)
+    return JSONResponse({"success": True})
 
 
 @with_cancellation
@@ -111,7 +135,7 @@ async def init_app(
     engine = (llm_engine
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.API_SERVER))
-
+    app.state.engine_client = engine
     return app
 
 
@@ -133,7 +157,7 @@ async def run_server(args: Namespace,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,
