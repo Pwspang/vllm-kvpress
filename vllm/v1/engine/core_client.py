@@ -230,6 +230,11 @@ class EngineCoreClient(ABC):
     ):
         raise NotImplementedError
 
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
+        raise NotImplementedError
+
     async def collective_rpc_async(
             self,
             method: Union[str, Callable[..., _R]],
@@ -734,6 +739,12 @@ class SyncMPClient(MPClient):
             self._send_input(UPDATE_MASK_REQUEST_TYPE,
                              (request_id, evictable_token_ranges))
 
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
+        return self.engine_core.get_request_l2_norms(request_id, start_index)
+
+
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
@@ -942,10 +953,10 @@ class AsyncMPClient(MPClient):
                                    (request_id, evictable_token_ranges))
 
     async def get_request_l2_norms_async(
-        self, request_id: str
+        self, request_id: str, start_index: int = 0
     ) -> Optional[List[float]]:
         """Get L2 norms of attention keys for a running request via RPC."""
-        return await self.call_utility_async("get_request_l2_norms", request_id)
+        return await self.call_utility_async("get_request_l2_norms", request_id, start_index)
 
     async def configure_l2_norms_async(
         self,

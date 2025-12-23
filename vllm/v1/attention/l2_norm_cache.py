@@ -72,9 +72,11 @@ class RequestL2NormData:
 
             self.num_layers_accumulated += 1
 
-    def get_norms(self) -> List[float]:
+    def get_norms(self, start_index: int = 0) -> List[float]:
         with self._lock:
-            return self.buffer[:self.current_seq_len].tolist()
+            if start_index >= self.current_seq_len:
+                return []
+            return self.buffer[start_index:self.current_seq_len].tolist()
 
 
 class L2NormCache:
@@ -265,19 +267,20 @@ class L2NormCache:
         except Exception as e:
             logger.warning(f"Error computing L2 norms batch: {e}")
     
-    def get_norms(self, request_id: str) -> Optional[List[float]]:
+    def get_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
         """
         Get L2 norms for a request.
         
         Args:
             request_id: The request ID
+            start_index: Start index for differential retrieval
             
         Returns:
             List of L2 norms per token, or None if not available
         """
         with self._data_lock:
             if request_id in self._request_data:
-                return self._request_data[request_id].get_norms()
+                return self._request_data[request_id].get_norms(start_index)
         return None
     
     def remove_request(self, request_id: str):

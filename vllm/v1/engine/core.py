@@ -207,7 +207,7 @@ class EngineCore:
         """Delegates the mask update to the scheduler."""
         self.scheduler.update_request_mask(request_id, evictable_token_ranges)
 
-    def get_request_l2_norms(self, request_id: str) -> Optional[List[float]]:
+    def get_request_l2_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
         """Get L2 norms of attention keys for a running request.
         
         This method runs in the EngineCore process where the L2NormCache exists.
@@ -218,7 +218,7 @@ class EngineCore:
         try:
             from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
             cache = get_l2_norm_cache()
-            norms = cache.get_norms(request_id)
+            norms = cache.get_norms(request_id, start_index)
             return norms
         except Exception as e:
             logger.warning(f"Could not get L2 norms for {request_id}: {e}")
