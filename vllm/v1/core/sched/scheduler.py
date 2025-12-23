@@ -179,7 +179,34 @@ class Scheduler(SchedulerInterface):
         self.request_eviction_data[request_id] = evictable_token_ranges
         logger.debug(f"Stored evictable ranges for request {request_id}")
 
+    def _process_evictions(self) -> None:
+        """Process evictable token ranges and free corresponding physical blocks."""
+        if not self.request_eviction_data:
+            return
+
+        block_size = self.kv_cache_manager.block_size
+        if block_size is None:
+            return
+
+        for request_id, ranges in self.request_eviction_data.items():
+            blocks_to_free: set[int] = set()
+            for start, end in ranges:
+                # Calculate block index range fully covered by [start, end)
+                # start_block = ceil(start / block_size)
+                start_block = (start + block_size - 1) // block_size
+                # end_block = floor(end / block_size)
+                end_block = end // block_size
+                
+                if start_block < end_block:
+                    blocks_to_free.update(range(start_block, end_block))
+            
+            if blocks_to_free:
+                self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
+
     def schedule(self) -> SchedulerOutput:
+        # Process evictions first to free up blocks
+        self._process_evictions()
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and

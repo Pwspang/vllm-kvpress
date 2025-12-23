@@ -304,6 +304,10 @@ class KVCacheManager:
 
         return KVCacheBlocks(new_blocks)
 
+    def free_blocks(self, request_id: str, block_indices: list[int]) -> None:
+        """Free specific blocks for the request."""
+        self.coordinator.free_blocks(request_id, block_indices)
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that he tail blocks are evicted 

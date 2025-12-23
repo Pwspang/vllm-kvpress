@@ -157,6 +157,21 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
+    def free_blocks(self, request_id: str, block_indices: list[int]) -> None:
+        """Free specific blocks for a request."""
+        if request_id not in self.req_to_blocks:
+            return
+
+        blocks = self.req_to_blocks[request_id]
+        blocks_to_free = []
+        for idx in block_indices:
+            if idx < len(blocks) and blocks[idx] != self._null_block:
+                blocks_to_free.append(blocks[idx])
+                blocks[idx] = self._null_block
+
+        if blocks_to_free:
+            self.block_pool.free_blocks(blocks_to_free)
+
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.

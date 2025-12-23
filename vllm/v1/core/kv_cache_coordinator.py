@@ -113,6 +113,17 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.cache_blocks(request, block_hashes, num_computed_tokens)
 
+    def free_blocks(self, request_id: str, block_indices: list[int]) -> None:
+        """
+        Free specific blocks for the request.
+
+        Args:
+            request_id: The request ID.
+            block_indices: The indices of the blocks to free.
+        """
+        for manager in self.single_type_managers:
+            manager.free_blocks(request_id, block_indices)
+
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.

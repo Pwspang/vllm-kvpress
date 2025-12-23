@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import Any, Optional, Union, List
+from typing import Any, Optional, Union, List, Tuple
 
 import numpy as np
 
@@ -155,10 +155,19 @@ class AsyncLLM(EngineClient):
         # which needs to be implemented to send a message to the engine process.
         await self.engine_core.update_request_mask_async(
             request_id, evictable_token_ranges)
+            
+    async def evict_kv_blocks(
+        self,
+        request_id: str,
+        evictable_token_ranges: List[Tuple[int, int]]
+    ) -> None:
+        """Trigger physical eviction of KV cache blocks."""
+        await self.update_request_mask(request_id, evictable_token_ranges)
     
     async def get_request_l2_norms(
         self,
         request_id: str,
+        start_index: int = 0
     ) -> Optional[List[float]]:
         """
         Get L2 norms of attention keys for a running request.
@@ -173,7 +182,7 @@ class AsyncLLM(EngineClient):
             raise EngineDeadError()
         
         try:
-            return await self.engine_core.get_request_l2_norms_async(request_id)
+            return await self.engine_core.get_request_l2_norms_async(request_id, start_index)
         except Exception as e:
             logger.debug(f"Could not get L2 norms for {request_id}: {e}")
             return None

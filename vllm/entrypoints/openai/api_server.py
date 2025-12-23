@@ -361,6 +361,11 @@ class UpdateMaskRequest(pydantic.BaseModel):
 
 class L2NormsRequest(pydantic.BaseModel):
     request_id: str
+    start_index: int = 0
+
+class EvictKVBlocksRequest(pydantic.BaseModel):
+    request_id: str
+    evictable_token_ranges: List[Tuple[int, int]]
 
 
 class L2NormConfigRequest(pydantic.BaseModel):
@@ -475,7 +480,7 @@ async def get_l2_norms(request: L2NormsRequest, raw_request: Request):
 
     # Check if the engine supports L2 norm retrieval
     if hasattr(engine, "get_request_l2_norms"):
-        l2_norms = await engine.get_request_l2_norms(request.request_id)
+        l2_norms = await engine.get_request_l2_norms(request.request_id, request.start_index)
         if l2_norms is not None:
             return JSONResponse({
                 "success": True,
@@ -517,6 +522,31 @@ async def update_attention_mask(request: UpdateMaskRequest,
         raise HTTPException(
             status_code=HTTPStatus.NOT_IMPLEMENTED,
             detail="The current engine does not support attention mask updates."
+        )
+
+@router.post("/v1/kv_cache/evict")
+async def evict_kv_blocks(request: EvictKVBlocksRequest,
+                          raw_request: Request):
+    """
+    Endpoint to trigger physical eviction of KV cache blocks.
+    """
+    engine = engine_client(raw_request)
+    logger.info(f"Eviction request for {request.request_id} with {len(request.evictable_token_ranges)} ranges")
+    
+    # Check for support in AsyncLLM
+    if hasattr(engine, "evict_kv_blocks"):
+        await engine.evict_kv_blocks(request.request_id,
+                                     request.evictable_token_ranges)
+        return JSONResponse({"success": True})
+    # Fallback to update_request_mask if evict_kv_blocks not explicit but update_request_mask is
+    elif hasattr(engine, "update_request_mask"):
+        await engine.update_request_mask(request.request_id,
+                                         request.evictable_token_ranges)
+        return JSONResponse({"success": True})
+    else:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_IMPLEMENTED,
+            detail="The current engine does not support KV cache eviction."
         )
         
 
