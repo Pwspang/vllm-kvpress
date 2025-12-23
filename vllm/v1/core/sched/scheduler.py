@@ -178,6 +178,11 @@ class Scheduler(SchedulerInterface):
         """
         self.request_eviction_data[request_id] = evictable_token_ranges
         logger.debug(f"Stored evictable ranges for request {request_id}")
+    
+    def _process_eviction(self) -> None:
+        for request_id, req in enumerate(self.running):
+            # logger.info(f"Number of KVC tokens: {req.num_computed_tokens - req.num_dropped_tokens}")
+            self.kv_cache_manager.free_blocks(req.request_id, req.num_computed_tokens - req.num_dropped_tokens)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -190,7 +195,8 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
-
+        self._process_eviction()
+        
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -555,7 +561,7 @@ class Scheduler(SchedulerInterface):
         logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") #All scheduled reqs: ['chatcmpl-q1_c1_clustering']
         logger.debug(f"Request Eviction Data: {self.request_eviction_data}")
         for req in all_scheduled_reqs:
-            if ranges := self.request_eviction_data.get(req.request_id.split("-")[-1]):
+            if ranges := self.request_eviction_data.get(req.request_id):
                 logger.debug(req.request_id)
                 logger.debug(ranges)
                 evictable_token_ranges_map[req.request_id] = ranges

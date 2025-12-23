@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
@@ -12,6 +13,9 @@ from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -173,6 +177,28 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+    
+    def free_blocks(self, request_id: str, num_tokens: int) -> None:
+        """Free blocks for a request"""
+        if request_id not in self.req_to_blocks:
+            return 
+        
+        if self.block_size is None:
+            return 
+        
+        num_blocks = math.ceil(num_tokens / self.block_size)
+        
+        blocks = self.req_to_blocks[request_id]
+        
+        if len(blocks) == num_blocks:
+            return
+        
+        blocks_to_free = blocks[num_blocks:]
+        # logger.info(f"Free: {len(blocks) - num_blocks} of blocks")
+        logger.debug(f"Num_block: {num_blocks} len_blocks: {len(blocks)}")
+        
+        if blocks_to_free:
+            self.block_pool.free_blocks(blocks_to_free)
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, request_id: str,

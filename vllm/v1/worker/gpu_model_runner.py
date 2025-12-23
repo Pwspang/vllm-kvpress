@@ -1702,9 +1702,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
         if hasattr(scheduler_output, "evictable_token_ranges_map") and scheduler_output.evictable_token_ranges_map:
-            logger.debug(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
+            # logger.info(f"Evictable Token Ranges Map: {scheduler_output.evictable_token_ranges_map}")
             self.drop_kv_cache(attn_metadata, scheduler_output.evictable_token_ranges_map)
-            
+        
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
@@ -1826,12 +1826,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         
+        
+                
         for i, req_id in enumerate(self.input_batch.req_ids):
             past_evictions = torch.tensor(self.evicted_tokens.get(req_id, []))
             new_evictions = torch.tensor(evictable_token_ranges_map.get(req_id, []))
             
             # Skip if no new eviction request is required
-            if past_evictions.shape == new_evictions.shape and torch.all(past_evictions == new_evictions):
+            if past_evictions.shape == new_evictions.shape:
                 continue
             
             # Assume all layers share the same slot mapping (Implemented this way)
@@ -1844,6 +1846,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             slot_mapping = attn.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i + 1]]
             
+            req_state = self.requests[req_id]
+
             # print(attn)
             
             # kept_token_indices = get_indices(req_id, slot_mapping)
@@ -1860,10 +1864,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             compressed_kv_len = keep_indices.size(0)
             
-            # print(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
+            logger.debug(f"{req_id}: [Current KV Len] {current_kv_len} [Compressed KV Len] {compressed_kv_len}")
             
-            # if kept_token_indices.numel() == 0 or current_kv_len - compressed_kv_len == 0:
-            #     continue
+            if current_kv_len - compressed_kv_len == 0:
+                continue
             
             # logger.info(f"Before Compression: {current_kv_len} After Compression: {compressed_kv_len}")
             # logger.info(f"Past Eviction: {past_evictions}")
@@ -1884,26 +1888,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 viewed_key = key_cache.reshape(-1, key_cache.size(-2), key_cache.size(-1))
                 viewed_value = value_cache.reshape(-1, key_cache.size(-2), key_cache.size(-1))
                 
-                # current_key_cache = key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[
-                #     slot_mapping, ...
-                # ]
-                # current_value_cache = value_cache.view(-1, value_cache.size(-2), value_cache.size(-1))[
-                #     slot_mapping, ...
-                # ]
-
-                # print("key_cache.view shape:", key_cache.view(-1, key_cache.size(-2), key_cache.size(-1)).shape)
-                # print(common_attn_metadata.occupied_slot_mapping[seq_starts_ends_indices[i]:seq_starts_ends_indices[i]+compressed_kv_len])
-                # print(kept_token_indices)
-                
-                # key_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[slot_mapping[:compressed_kv_len], ...] = (
-                #     current_key_cache[kept_token_indices, :, :]
-                # )
-                # value_cache.view(-1, key_cache.size(-2), key_cache.size(-1))[slot_mapping[:compressed_kv_len], ...] = (
-                #     current_value_cache[kept_token_indices, :, :]
-                # )
-                
                 dst_idx = slot_mapping[:compressed_kv_len]
                 src_idx = slot_mapping[keep_indices]
+                
+                common_attn_metadata.slot_mapping[i] = slot_mapping[compressed_kv_len]
                 
                 viewed_key.index_copy_(0, dst_idx, viewed_key[src_idx])
                 viewed_value.index_copy_(0, dst_idx, viewed_value[src_idx])

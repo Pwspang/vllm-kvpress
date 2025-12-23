@@ -20,11 +20,13 @@ class BlockTable:
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
+        max_model_len: int,
     ):
         self.block_size = block_size
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_model_len = max_model_len
         self.pin_memory = pin_memory
         self.device = device
 
@@ -51,12 +53,12 @@ class BlockTable:
                                         dtype=torch.int64,
                                         device=self.device)
 
-        self.occupied_slot_mapping_cpu = torch.zeros(self.max_num_batched_tokens,
+        self.occupied_slot_mapping_cpu = torch.zeros(self.max_model_len,
                                                     dtype=torch.int64,
                                                     device="cpu",
                                                     pin_memory=self.pin_memory)
         self.occupied_slot_mapping_np = self.occupied_slot_mapping_cpu.numpy()
-        self.occupied_slot_mapping = torch.zeros(self.max_num_batched_tokens,
+        self.occupied_slot_mapping = torch.zeros(self.max_model_len,
                                                  dtype=torch.int64,
                                                  device=self.device)
 
@@ -146,7 +148,7 @@ class MultiGroupBlockTable:
         self.block_tables = [
             BlockTable(block_size, max_num_reqs, cdiv(max_model_len,
                                                       block_size),
-                       max_num_batched_tokens, pin_memory, device)
+                       max_num_batched_tokens, pin_memory, device, max_model_len)
             for block_size in block_sizes
         ]
 

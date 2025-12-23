@@ -519,7 +519,7 @@ class FlashAttentionImpl(AttentionImpl):
                     # key_cache shape is already [num_blocks, block_size, num_kv_heads, head_size]
                     # No reshape needed!
                     if layer_idx == 0:  # Only log once per forward pass
-                        logger.info(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
+                        logger.debug(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
                     l2_cache.update_norms_batch(
                         request_ids=attn_metadata.request_ids,
                         key_cache=key_cache,  # Already in correct shape

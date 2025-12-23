@@ -253,7 +253,7 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
+        num_computed_tokens = (request.num_computed_tokens - request.num_dropped_tokens +
                                num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
@@ -296,13 +296,19 @@ class KVCacheManager:
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
         num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
                                   request.num_tokens)
-        self.coordinator.cache_blocks(
-            request,
-            self.req_to_block_hashes[request.request_id],
-            num_tokens_to_cache,
-        )
+        
+        # PATCHED to ignore caching
+        # self.coordinator.cache_blocks(
+        #     request,
+        #     self.req_to_block_hashes[request.request_id],
+        #     num_tokens_to_cache,
+        # )
 
         return KVCacheBlocks(new_blocks)
+    
+    def free_blocks(self, request_id: str, num_tokens: int) -> None:
+        """Free blocks based on total tokens"""
+        self.coordinator.free_blocks(request_id, num_tokens)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
