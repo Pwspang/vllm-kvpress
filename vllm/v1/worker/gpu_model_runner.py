@@ -54,6 +54,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
     reorder_batch_to_split_decodes_and_prefills)
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
@@ -616,19 +617,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
         if evicted_ranges:
-            for block_table_obj in self.input_batch.block_table.block_tables:
+            for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
                 block_size = block_table_obj.block_size
                 bt_np = block_table_obj.block_table_np
 
                 for req_id, ranges in evicted_ranges.items():
                     req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_index is not None:
+                        # Update CachedRequestState to reflect eviction
+                        # This prevents stale (freed) block IDs from being re-added to the
+                        # input batch if the request is preempted or re-scheduled.
+                        if req_id in self.requests:
+                            req_state = self.requests[req_id]
+                            if group_id < len(req_state.block_ids):
+                                block_ids_list = req_state.block_ids[group_id]
+                                for start, end in ranges:
+                                    start_block = (start + block_size - 1) // block_size
+                                    end_block = end // block_size
+                                    
+                                    # Mark as evicted in the Python list
+                                    for block_idx in range(start_block, end_block):
+                                        if block_idx < len(block_ids_list):
+                                            block_ids_list[block_idx] = 0
+
+                        # Update the active block table (numpy)
+                        # We use 0 instead of -1 because FlashAttention kernels may crash
+                        # if they encounter -1 in the block table (Illegal Memory Access).
+                        # We rely on the attention mask (updated via update_request_mask)
+                        # to prevent the model from attending to this garbage block.
                         for start, end in ranges:
                             start_block = (start + block_size - 1) // block_size
                             end_block = end // block_size
 
                             if start_block < end_block:
-                                bt_np[req_index, start_block:end_block] = -1
+                                bt_np[req_index, start_block:end_block] = 0
 
     def _extract_mm_kwargs(
         self,
@@ -930,11 +952,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     'common_attn_metadata': common_attn_metadata,
                 }
                 
-                # Add request_ids if builder supports it (FlexAttention)
+                # Add request_ids if builder supports it
                 if hasattr(builder, 'build'):
                     import inspect
                     sig = inspect.signature(builder.build)
-                    if 'request_ids' in sig.parameters:
+                    if 'request_ids' in sig.parameters and get_l2_norm_cache().is_enabled:
                         builder_kwargs['request_ids'] = list(self.input_batch.req_ids[:num_reqs])
                         builder_kwargs['compute_l2_norms'] = True
                 

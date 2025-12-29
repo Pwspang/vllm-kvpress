@@ -579,10 +579,10 @@ class Scheduler(SchedulerInterface):
         evictable_token_ranges_map: dict[str, list[tuple[int, int]]] = {}
         all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
                                 scheduled_running_reqs)
-        logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") #All scheduled reqs: ['chatcmpl-q1_c1_clustering']
+        logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") # All scheduled reqs: ['chatcmpl-q1_c1_clustering']
         logger.debug(f"Request Eviction Data: {self.request_eviction_data}")
         for req in all_scheduled_reqs:
-            if ranges := self.request_eviction_data.get(req.request_id.split("-")[-1]):
+            if ranges := self.request_eviction_data.get(req.request_id):
                 logger.debug(req.request_id)
                 logger.debug(ranges)
                 evictable_token_ranges_map[req.request_id] = ranges
