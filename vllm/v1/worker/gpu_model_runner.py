@@ -620,7 +620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
                 block_size = block_table_obj.block_size
                 bt_np = block_table_obj.block_table_np
-
+                
                 for req_id, ranges in evicted_ranges.items():
                     req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_index is not None:
@@ -648,10 +648,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         for start, end in ranges:
                             start_block = (start + block_size - 1) // block_size
                             end_block = end // block_size
+                            
+                            # Fill fragmented memory with first token
+                            # Acts as an attention sink
+                            # Check if eviction operation is done previously
+                            if bt_np[req_index, start_block] != 0:
+                                sink_block_id = bt_np[req_index, 0]
+                                if start % block_size != 0:
+                                    logger.info("RUN HERE")
+                                    self._replace_kv_caches(sink_block_id, 
+                                                            start_block-1, 
+                                                            list(range(start%block_size, block_size)))
+                                
+                                if end % block_size != 0:
+                                    self._replace_kv_caches(sink_block_id, 
+                                                            end_block, 
+                                                            list(range(0, end % block_size)))
 
                             if start_block < end_block:
                                 bt_np[req_index, start_block:end_block] = 0
+                            
+ 
+                            
+    
+    def _replace_kv_caches(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int]) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, sink_block_id, 0]
+            sink_v = kv_cache[1, sink_block_id, 0]
 
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v
+    
     def _extract_mm_kwargs(
         self,
         scheduler_output: "SchedulerOutput",
