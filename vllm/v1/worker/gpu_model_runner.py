@@ -655,7 +655,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             if bt_np[req_index, start_block] != 0:
                                 sink_block_id = bt_np[req_index, 0]
                                 if start % block_size != 0:
-                                    logger.info("RUN HERE")
                                     self._replace_kv_caches(sink_block_id, 
                                                             start_block-1, 
                                                             list(range(start%block_size, block_size)))
