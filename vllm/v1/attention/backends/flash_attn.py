@@ -440,6 +440,50 @@ class FlashAttentionImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer")
 
+    def _compute_l2_norms_if_enabled(
+        self,
+        attn_metadata: FlashAttentionMetadata,
+        key_cache: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> None:
+        """Compute L2 norms of keys AFTER attention to ensure deterministic attention output.
+        
+        By computing L2 norms after flash_attn_varlen_func, we ensure:
+        1. Attention computation happens first with consistent GPU state
+        2. L2 norm non-determinism (from atomic reductions) doesn't affect attention output
+        3. L2 norms are still accurate for eviction decisions
+        """
+        if not (attn_metadata.compute_l2_norms and 
+                attn_metadata.request_ids is not None):
+            return
+        
+        try:
+            l2_cache = get_l2_norm_cache()
+            # Extract layer index from layer name (e.g., "model.layers.0.self_attn" -> 0)
+            layer_idx = None
+            if hasattr(layer, 'layer_name') and layer.layer_name:
+                import re
+                match = re.search(r'\.layers\.(\d+)\.', layer.layer_name)
+                if match:
+                    layer_idx = int(match.group(1))
+            
+            if l2_cache.is_enabled and (layer_idx is None or l2_cache.should_compute_for_layer(layer_idx)):
+                # key_cache shape is already [num_blocks, block_size, num_kv_heads, head_size]
+                if layer_idx == 0:  # Only log once per forward pass
+                    logger.info(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
+                l2_cache.update_norms_batch(
+                    request_ids=attn_metadata.request_ids,
+                    key_cache=key_cache,
+                    block_table=attn_metadata.block_table,
+                    seq_lens=attn_metadata.seq_lens,
+                    block_size=16,
+                    layer_idx=layer_idx,
+                )
+        except Exception as e:
+            logger.warning(f"Error computing L2 norms: {e}")
+            import traceback
+            traceback.print_exc()
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -501,38 +545,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
-        
-        # Compute L2 norms of keys if enabled and request_ids available
-        if (attn_metadata.compute_l2_norms and 
-            attn_metadata.request_ids is not None):
-            try:
-                l2_cache = get_l2_norm_cache()
-                # Extract layer index from layer name (e.g., "model.layers.0.self_attn" -> 0)
-                layer_idx = None
-                if hasattr(layer, 'layer_name') and layer.layer_name:
-                    import re
-                    match = re.search(r'\.layers\.(\d+)\.', layer.layer_name)
-                    if match:
-                        layer_idx = int(match.group(1))
-                
-                if l2_cache.is_enabled and (layer_idx is None or l2_cache.should_compute_for_layer(layer_idx)):
-                    # key_cache shape is already [num_blocks, block_size, num_kv_heads, head_size]
-                    # No reshape needed!
-                    if layer_idx == 0:  # Only log once per forward pass
-                        logger.info(f"L2 norms: computing for request_ids={attn_metadata.request_ids}, key_cache.shape={key_cache.shape}")
-                    l2_cache.update_norms_batch(
-                        request_ids=attn_metadata.request_ids,
-                        key_cache=key_cache,  # Already in correct shape
-                        block_table=attn_metadata.block_table,
-                        seq_lens=attn_metadata.seq_lens,
-                        block_size=16
-                        ,
-                        layer_idx=layer_idx,
-                    )
-            except Exception as e:
-                logger.warning(f"Error computing L2 norms: {e}")
-                import traceback
-                traceback.print_exc()
 
 
         if self.kv_sharing_target_layer_name is None:
@@ -600,6 +612,8 @@ class FlashAttentionImpl(AttentionImpl):
                 s_aux=self.sinks,
             )
             
+            # Compute L2 norms AFTER attention to ensure deterministic attention output
+            self._compute_l2_norms_if_enabled(attn_metadata, key_cache, layer)
             return output
 
         # Cascade attention (rare case).
@@ -627,6 +641,8 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
         )
+        # Compute L2 norms AFTER attention to ensure deterministic attention output
+        self._compute_l2_norms_if_enabled(attn_metadata, key_cache, layer)
         return output
 
     def _forward_encoder_attention(
